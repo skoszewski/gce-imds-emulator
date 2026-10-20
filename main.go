@@ -65,7 +65,7 @@ func (s *metadataServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Metadata-Flavor", "Google")
 	w.Header().Set("Server", "Metadata Server for VM")
 	status := s.handle(w, r)
-	log.Printf("%s %s %d", r.Method, r.URL.Path, status)
+	log.Printf("%s %s %d", r.Method, r.URL.EscapedPath(), status)
 }
 
 // handle writes the response of a request and returns its status.

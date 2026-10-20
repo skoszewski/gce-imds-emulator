@@ -243,6 +243,20 @@ func TestRequestLogOmitsQuery(t *testing.T) {
 	}
 }
 
+func TestRequestLogEscapesPath(t *testing.T) {
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	defer log.SetOutput(io.Discard)
+
+	get(newTestServer(nil), "/x%0a2026/10/20%2012:00:00%20GET%20/forged%20200%0d%0a%1b[2J")
+	if got := strings.Count(logged.String(), "\n"); got != 1 {
+		t.Errorf("the log has %d lines, want 1:\n%q", got, logged.String())
+	}
+	if strings.ContainsAny(strings.TrimSuffix(logged.String(), "\n"), "\r\n\x1b") {
+		t.Errorf("the log contains control characters:\n%q", logged.String())
+	}
+}
+
 func TestHeadHasNoBody(t *testing.T) {
 	server := httptest.NewServer(newTestServer(nil))
 	defer server.Close()
