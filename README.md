@@ -27,6 +27,9 @@ The emulator reads its settings from the environment:
 | `IMDS_HOST` | all interfaces | Address the server binds |
 | `IMDS_PORT` | `8080` | Port the server listens on |
 | `IMDS_ALLOWED_SCOPES` | all scopes | Comma separated scopes that token requests may use |
+| `IMDS_ALLOWED_CIDRS` | all addresses | Comma separated networks in CIDR notation whose clients are served |
+
+With `IMDS_ALLOWED_CIDRS`, a request from a client address outside the networks is rejected with the status 403. The address is the one of the TCP connection; IPv4 clients of the dual-stack listener are matched by their IPv4 address. An entry that is not a valid prefix, such as an address without a length, stops the emulator at startup. The health check connects from the loopback address, so the list must contain `127.0.0.1/32` or `::1/128` for the check to pass. Behind a published container port or a proxy, the connection comes from the proxy address, so the list cannot distinguish the clients there.
 
 With `IMDS_ALLOWED_SCOPES`, a token request with a scope outside the list is rejected with the status 400 before any token is requested, and the scopes endpoints report the list instead of the `cloud-platform` scope. A token request without the `scopes` parameter asks for the `cloud-platform` scope, so the list must contain it for such requests to succeed. The variable limits what the clients of an emulator on a host can obtain, where the network does not separate the clients.
 
@@ -51,7 +54,7 @@ All paths are below `/computeMetadata/v1/`. The service account is named `defaul
 | `instance/hostname` | Host name |
 | `universe/universe-domain` | `googleapis.com` |
 
-Every other path returns 404. Methods other than `GET` and `HEAD` return 405. Requests without the header `Metadata-Flavor: Google`, or with `X-Forwarded-For`, return 403. Every response carries `Metadata-Flavor: Google`.
+Every other path returns 404. Methods other than `GET` and `HEAD` return 405. Requests without the header `Metadata-Flavor: Google`, with `X-Forwarded-For`, or from an address outside `IMDS_ALLOWED_CIDRS` return 403. Every response carries `Metadata-Flavor: Google`.
 
 The emulator logs one line per request with the method, the path and the status. It never logs the query string or the token.
 
@@ -94,7 +97,7 @@ The image is built in two stages by the `Dockerfile`. The first stage runs the u
 - **Bounded provider cache.** At most 16 providers are kept. When the limit is reached, all of them are dropped. A client therefore cannot grow the memory of the emulator by requesting many scope sets, and the simple eviction suffices because clients use few scope sets.
 - **Subset of the metadata server.** The emulator serves the endpoints that the Google client libraries use for authentication and project detection. Other paths return 404 instead of made up values, so a client that depends on them fails visibly.
 - **Request checks of the metadata server.** The emulator rejects requests without the flavor header and proxied requests, as the metadata server does. This protects against requests forged by a browser or forwarded by a proxy, but it does not authenticate the client.
-- **Network as the trust boundary.** Every client that reaches the port gets the tokens of the service account. The emulator therefore publishes no port in a container setup, and binds the loopback interface through `IMDS_HOST` when it runs on a host. On a host, `IMDS_ALLOWED_SCOPES` limits the tokens to the scopes the local clients need.
+- **Network as the trust boundary.** Every client that reaches the port gets the tokens of the service account. The emulator therefore publishes no port in a container setup, and binds the loopback interface through `IMDS_HOST` when it runs on a host. On a host, `IMDS_ALLOWED_CIDRS` limits the clients to known networks and `IMDS_ALLOWED_SCOPES` limits the tokens to the scopes they need. Both are a second layer behind the network isolation or the firewall, which remain the primary boundary.
 - **No error details to clients.** A failed token request returns a generic 500. The details go to the log, where only the operator sees them.
 - **Signal handling as PID 1.** The emulator runs as the first process of its container, which receives no default signal handling from the kernel. It handles `SIGTERM` and `SIGINT` itself: the first signal stops accepting connections and lets the requests in progress finish for up to 20 seconds, then the emulator exits with status 0. A second signal makes it exit with status 1 at once. The stop grace period of the container must exceed 20 seconds.
 - **Health check in the same binary.** The distroless image has no shell or HTTP client, so the binary checks itself with `-check`. The check uses the same ping as the clients.
@@ -161,4 +164,4 @@ Run the unit tests on a workstation with Go:
 go test -race ./...
 ```
 
-The tests cover the request checks, the endpoints, the scope parsing, the allowed scopes, the token response, the request log, the provider cache, the extraction of the email, the shutdown, the health check, and runs of the emulator as a process stopped with real signals.
+The tests cover the request checks, the endpoints, the scope parsing, the allowed scopes, the allowed client networks, the token response, the request log, the provider cache, the extraction of the email, the shutdown, the health check, and runs of the emulator as a process stopped with real signals.

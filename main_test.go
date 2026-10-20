@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -387,6 +388,38 @@ func TestAllowedScopes(t *testing.T) {
 	}
 	if !slices.Equal(account.Scopes, []string{"a", "b"}) {
 		t.Errorf("account scopes = %v, want [a b]", account.Scopes)
+	}
+}
+
+func TestAllowedCIDRs(t *testing.T) {
+	allowed := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("::1/128")}
+	tests := []struct {
+		name    string
+		allowed []netip.Prefix
+		remote  string
+		want    int
+	}{
+		{"allowed IPv4", allowed, "10.1.2.3:1234", 200},
+		{"other IPv4", allowed, "192.168.1.1:1234", 403},
+		{"mapped IPv4", allowed, "[::ffff:10.1.2.3]:1234", 200},
+		{"allowed IPv6", allowed, "[::1]:1234", 200},
+		{"other IPv6", allowed, "[fe80::1]:1234", 403},
+		{"unparsable address", allowed, "unknown", 403},
+		{"no restriction", nil, "192.168.1.1:1234", 200},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := newTestServer(nil)
+			server.allowedCIDRs = test.allowed
+			request := httptest.NewRequest(http.MethodGet, root+"project/project-id", nil)
+			request.Header.Set("Metadata-Flavor", "Google")
+			request.RemoteAddr = test.remote
+			recorder := httptest.NewRecorder()
+			server.ServeHTTP(recorder, request)
+			if recorder.Code != test.want {
+				t.Errorf("status = %d, want %d", recorder.Code, test.want)
+			}
+		})
 	}
 }
 
@@ -861,6 +894,28 @@ func TestProcess(t *testing.T) {
 		}
 		if !strings.Contains(e.output.String(), "Allowed scopes: https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/devstorage.read_only") {
 			t.Errorf("unexpected log:\n%s", e.output.String())
+		}
+	})
+
+	t.Run("allowed CIDRs", func(t *testing.T) {
+		e := runEmulator(t, []string{"IMDS_ALLOWED_CIDRS=127.0.0.0/8, ::1/128"})
+		if got := email(t, e.address); got != testEmail {
+			t.Errorf("email = %q, want %q", got, testEmail)
+		}
+		if !strings.Contains(e.output.String(), "Allowed client networks: [127.0.0.0/8 ::1/128]") {
+			t.Errorf("unexpected log:\n%s", e.output.String())
+		}
+	})
+
+	t.Run("invalid CIDR", func(t *testing.T) {
+		command := exec.Command(os.Args[0])
+		command.Env = append(os.Environ(), mainEnv+"=1", "GOOGLE_APPLICATION_CREDENTIALS="+writeServiceAccountKey(t), "IMDS_HOST=127.0.0.1", "IMDS_PORT="+freePort(t), "IMDS_ALLOWED_CIDRS=10.0.0.1")
+		output, err := command.CombinedOutput()
+		if err == nil {
+			t.Fatalf("the emulator started with an invalid CIDR\n%s", output)
+		}
+		if !strings.Contains(string(output), "Invalid IMDS_ALLOWED_CIDRS") {
+			t.Errorf("unexpected output:\n%s", output)
 		}
 	})
 

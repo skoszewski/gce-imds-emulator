@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"regexp"
@@ -56,7 +57,8 @@ type metadataServer struct {
 	projectID     string
 	projectNumber string
 	hostname      string
-	allowedScopes []string // nil allows every scope
+	allowedScopes []string       // nil allows every scope
+	allowedCIDRs  []netip.Prefix // nil allows every client address
 	token         tokenFunc
 	now           func() time.Time
 }
@@ -78,6 +80,14 @@ func (s *metadataServer) handle(w http.ResponseWriter, r *http.Request) int {
 	// The real IMDS rejects requests without the flavor header and proxied requests.
 	if r.Header.Get("Metadata-Flavor") != "Google" || r.Header.Get("X-Forwarded-For") != "" {
 		return text(w, http.StatusForbidden, "Forbidden")
+	}
+
+	// IPv4 clients of the dual-stack listener appear as IPv4-mapped IPv6 addresses.
+	if s.allowedCIDRs != nil {
+		remote, err := netip.ParseAddrPort(r.RemoteAddr)
+		if err != nil || !slices.ContainsFunc(s.allowedCIDRs, func(cidr netip.Prefix) bool { return cidr.Contains(remote.Addr().Unmap()) }) {
+			return text(w, http.StatusForbidden, "Forbidden")
+		}
 	}
 
 	if r.URL.Path == "/" || r.URL.Path == root {
@@ -326,6 +336,16 @@ func main() {
 	if value := os.Getenv("IMDS_ALLOWED_SCOPES"); value != "" {
 		allowedScopes = slices.Sorted(slices.Values(parseScopes(value)))
 	}
+	var allowedCIDRs []netip.Prefix
+	if value := os.Getenv("IMDS_ALLOWED_CIDRS"); value != "" {
+		for item := range strings.SplitSeq(value, ",") {
+			cidr, err := netip.ParsePrefix(strings.TrimSpace(item))
+			if err != nil {
+				log.Fatalf("Invalid IMDS_ALLOWED_CIDRS: %v", err)
+			}
+			allowedCIDRs = append(allowedCIDRs, cidr)
+		}
+	}
 
 	// The credentials detected at startup serve the default scope.
 	cache := &providerCache{detect: detect, providers: map[string]auth.TokenProvider{defaultScope: defaults}}
@@ -335,6 +355,7 @@ func main() {
 		projectNumber: os.Getenv("PROJECT_NUMBER"),
 		hostname:      cmp.Or(os.Getenv("IMDS_HOSTNAME"), hostname),
 		allowedScopes: allowedScopes,
+		allowedCIDRs:  allowedCIDRs,
 		token:         cache.token,
 		now:           time.Now,
 	}
@@ -355,6 +376,9 @@ func main() {
 	log.Printf("Serving tokens of %s for project %s on %s", email, cmp.Or(projectID, "-"), listener.Addr())
 	if allowedScopes != nil {
 		log.Printf("Allowed scopes: %s", strings.Join(allowedScopes, " "))
+	}
+	if allowedCIDRs != nil {
+		log.Printf("Allowed client networks: %v", allowedCIDRs)
 	}
 	if err := serve(ctx, httpServer, listener, shutdownGrace); err != nil {
 		log.Fatalf("Server stopped: %v", err)
