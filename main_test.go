@@ -325,14 +325,38 @@ func TestTokenExpiry(t *testing.T) {
 }
 
 func TestTokenError(t *testing.T) {
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	defer log.SetOutput(io.Discard)
+
 	server := newTestServer(nil)
-	server.token = func(context.Context, []string) (*auth.Token, error) { return nil, errors.New("secret detail") }
+	server.token = func(context.Context, []string) (*auth.Token, error) {
+		return nil, errors.New("status code 400: {\n \"error\": \"secret detail\"\n}")
+	}
 	recorder := get(server, root+"instance/service-accounts/default/token")
 	if recorder.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", recorder.Code)
 	}
 	if strings.Contains(recorder.Body.String(), "secret detail") {
 		t.Errorf("the response %q leaks the error", recorder.Body.String())
+	}
+	if !strings.Contains(logged.String(), "secret detail") {
+		t.Errorf("the error was not logged:\n%s", logged.String())
+	}
+	if got := strings.Count(logged.String(), "\n"); got != 2 {
+		t.Errorf("the log has %d lines, want the error and the request:\n%q", got, logged.String())
+	}
+}
+
+func TestProviderCacheSeeded(t *testing.T) {
+	seeded := tokenProviderFunc(func(context.Context) (*auth.Token, error) { return &auth.Token{Value: "seeded"}, nil })
+	cache := &providerCache{
+		detect:    func([]string) (auth.TokenProvider, error) { return nil, errors.New("detect called") },
+		providers: map[string]auth.TokenProvider{defaultScope: seeded},
+	}
+	token, err := cache.token(context.Background(), []string{defaultScope})
+	if err != nil || token.Value != "seeded" {
+		t.Errorf("token = %v, %v; want the seeded provider", token, err)
 	}
 }
 

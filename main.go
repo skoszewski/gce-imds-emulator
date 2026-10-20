@@ -103,7 +103,7 @@ func (s *metadataServer) handle(w http.ResponseWriter, r *http.Request) int {
 	case path == defaultAccount+"token":
 		token, err := s.token(r.Context(), parseScopes(query.Get("scopes")))
 		if err != nil {
-			log.Printf("token error: %v", err)
+			log.Printf("token error: %q", err)
 			return text(w, http.StatusInternalServerError, "Internal Server Error")
 		}
 		expiresIn := 3600
@@ -313,19 +313,23 @@ func main() {
 	}
 	hostname, _ := os.Hostname()
 
+	// The credentials detected at startup serve the default scope.
+	cache := &providerCache{detect: detect, providers: map[string]auth.TokenProvider{defaultScope: defaults}}
 	server := &metadataServer{
 		email:         email,
 		projectID:     projectID,
 		projectNumber: os.Getenv("PROJECT_NUMBER"),
 		hostname:      cmp.Or(os.Getenv("IMDS_HOSTNAME"), hostname),
-		token:         (&providerCache{detect: detect}).token,
+		token:         cache.token,
 		now:           time.Now,
 	}
 	httpServer := &http.Server{
 		Handler:           server,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 	}
 
 	listener, err := net.Listen("tcp", net.JoinHostPort(host, port))
