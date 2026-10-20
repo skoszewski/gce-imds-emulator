@@ -348,6 +348,48 @@ func TestTokenError(t *testing.T) {
 	}
 }
 
+func TestAllowedScopes(t *testing.T) {
+	tests := []struct {
+		name    string
+		allowed []string
+		target  string
+		status  int
+		body    string
+	}{
+		{"default scope allowed", []string{"a", defaultScope}, root + "instance/service-accounts/default/token", 200, ""},
+		{"default scope not allowed", []string{"a", "b"}, root + "instance/service-accounts/default/token", 400, "Bad Request"},
+		{"allowed scope", []string{"a", "b"}, root + "instance/service-accounts/default/token?scopes=b", 200, ""},
+		{"allowed scopes", []string{"a", "b"}, root + "instance/service-accounts/default/token?scopes=b,a", 200, ""},
+		{"one scope not allowed", []string{"a", "b"}, root + "instance/service-accounts/default/token?scopes=a,c", 400, "Bad Request"},
+		{"no restriction", nil, root + "instance/service-accounts/default/token?scopes=c", 200, ""},
+		{"scopes endpoint", []string{"a", "b"}, root + "instance/service-accounts/default/scopes", 200, "a\nb\n"},
+		{"scopes endpoint unrestricted", nil, root + "instance/service-accounts/default/scopes", 200, defaultScope + "\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var requested []string
+			server := newTestServer(&requested)
+			server.allowedScopes = test.allowed
+			recorder := get(server, test.target)
+			if recorder.Code != test.status || (test.body != "" && recorder.Body.String() != test.body) {
+				t.Errorf("got %d %q, want %d %q", recorder.Code, recorder.Body.String(), test.status, test.body)
+			}
+			if test.status == 400 && requested != nil {
+				t.Errorf("a token was requested for %v", requested)
+			}
+		})
+	}
+
+	recorder := get(&metadataServer{email: testEmail, allowedScopes: []string{"a", "b"}}, root+"instance/service-accounts/default/?recursive=true")
+	var account serviceAccount
+	if err := json.Unmarshal(recorder.Body.Bytes(), &account); err != nil {
+		t.Fatalf("invalid JSON %q: %v", recorder.Body.String(), err)
+	}
+	if !slices.Equal(account.Scopes, []string{"a", "b"}) {
+		t.Errorf("account scopes = %v, want [a b]", account.Scopes)
+	}
+}
+
 func TestProviderCacheSeeded(t *testing.T) {
 	seeded := tokenProviderFunc(func(context.Context) (*auth.Token, error) { return &auth.Token{Value: "seeded"}, nil })
 	cache := &providerCache{
@@ -797,6 +839,28 @@ func TestProcess(t *testing.T) {
 		e := runEmulator(t, []string{"SERVICE_ACCOUNT_EMAIL=other@dom-lab.iam.gserviceaccount.com"})
 		if got := email(t, e.address); got != "other@dom-lab.iam.gserviceaccount.com" {
 			t.Errorf("email = %q, want the override", got)
+		}
+	})
+
+	t.Run("allowed scopes", func(t *testing.T) {
+		e := runEmulator(t, []string{"IMDS_ALLOWED_SCOPES=https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/cloud-platform"})
+		for target, want := range map[string]int{
+			root + "instance/service-accounts/default/token?scopes=https://www.googleapis.com/auth/other": http.StatusBadRequest,
+			root + "instance/service-accounts/default/scopes":                                             http.StatusOK,
+		} {
+			request, _ := http.NewRequest(http.MethodGet, "http://"+e.address+target, nil)
+			request.Header.Set("Metadata-Flavor", "Google")
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode != want {
+				t.Errorf("%s: status = %d, want %d", target, response.StatusCode, want)
+			}
+		}
+		if !strings.Contains(e.output.String(), "Allowed scopes: https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/devstorage.read_only") {
+			t.Errorf("unexpected log:\n%s", e.output.String())
 		}
 	})
 

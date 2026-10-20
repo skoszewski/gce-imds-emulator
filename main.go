@@ -56,6 +56,7 @@ type metadataServer struct {
 	projectID     string
 	projectNumber string
 	hostname      string
+	allowedScopes []string // nil allows every scope
 	token         tokenFunc
 	now           func() time.Time
 }
@@ -97,11 +98,20 @@ func (s *metadataServer) handle(w http.ResponseWriter, r *http.Request) int {
 
 	query := r.URL.Query()
 	recursive := query.Get("recursive") == "true"
-	account := serviceAccount{Aliases: []string{"default"}, Email: s.email, Scopes: []string{defaultScope}}
+	reported := s.allowedScopes
+	if reported == nil {
+		reported = []string{defaultScope}
+	}
+	account := serviceAccount{Aliases: []string{"default"}, Email: s.email, Scopes: reported}
 
 	switch {
 	case path == defaultAccount+"token":
-		token, err := s.token(r.Context(), parseScopes(query.Get("scopes")))
+		scopes := parseScopes(query.Get("scopes"))
+		// Any scope outside the allowed list rejects the request.
+		if s.allowedScopes != nil && slices.ContainsFunc(scopes, func(scope string) bool { return !slices.Contains(s.allowedScopes, scope) }) {
+			return text(w, http.StatusBadRequest, "Bad Request")
+		}
+		token, err := s.token(r.Context(), scopes)
 		if err != nil {
 			log.Printf("token error: %q", err)
 			return text(w, http.StatusInternalServerError, "Internal Server Error")
@@ -118,7 +128,7 @@ func (s *metadataServer) handle(w http.ResponseWriter, r *http.Request) int {
 	case path == defaultAccount+"email":
 		return text(w, http.StatusOK, s.email)
 	case path == defaultAccount+"scopes":
-		return text(w, http.StatusOK, defaultScope+"\n")
+		return text(w, http.StatusOK, strings.Join(reported, "\n")+"\n")
 	case path == defaultAccount && recursive:
 		return jsonBody(w, account)
 	case path == defaultAccount:
@@ -312,6 +322,10 @@ func main() {
 		projectID, _ = defaults.ProjectID(ctx)
 	}
 	hostname, _ := os.Hostname()
+	var allowedScopes []string
+	if value := os.Getenv("IMDS_ALLOWED_SCOPES"); value != "" {
+		allowedScopes = slices.Sorted(slices.Values(parseScopes(value)))
+	}
 
 	// The credentials detected at startup serve the default scope.
 	cache := &providerCache{detect: detect, providers: map[string]auth.TokenProvider{defaultScope: defaults}}
@@ -320,6 +334,7 @@ func main() {
 		projectID:     projectID,
 		projectNumber: os.Getenv("PROJECT_NUMBER"),
 		hostname:      cmp.Or(os.Getenv("IMDS_HOSTNAME"), hostname),
+		allowedScopes: allowedScopes,
 		token:         cache.token,
 		now:           time.Now,
 	}
@@ -338,6 +353,9 @@ func main() {
 	}
 
 	log.Printf("Serving tokens of %s for project %s on %s", email, cmp.Or(projectID, "-"), listener.Addr())
+	if allowedScopes != nil {
+		log.Printf("Allowed scopes: %s", strings.Join(allowedScopes, " "))
+	}
 	if err := serve(ctx, httpServer, listener, shutdownGrace); err != nil {
 		log.Fatalf("Server stopped: %v", err)
 	}
